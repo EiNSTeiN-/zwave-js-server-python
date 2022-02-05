@@ -1,5 +1,4 @@
 """Provide a model for the Z-Wave JS node."""
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, TypedDict, Union, cast
 
 from ..const import (
@@ -9,14 +8,15 @@ from ..const import (
     PowerLevel,
     SecurityClass,
 )
-from ..event import Event
+from ..event import Event, EventBase
 from ..exceptions import (
     FailedCommand,
     NotFoundError,
     UnparseableValue,
     UnwriteableValue,
 )
-from .command_class import CommandClassInfo, CommandClassInfoDataType
+from .command_class import CommandClassInfo
+from .device_class import DeviceClass, DeviceClassDataType
 from .device_config import DeviceConfig, DeviceConfigDataType
 from .endpoint import Endpoint, EndpointDataType
 from .firmware import (
@@ -25,6 +25,13 @@ from .firmware import (
     FirmwareUpdateProgress,
     FirmwareUpdateProgressDataType,
 )
+from .node_health_check import (
+    CheckHealthProgress,
+    LifelineHealthCheckSummary,
+    RouteHealthCheckSummary,
+    TestPowerLevelProgress,
+)
+from .node_statistics import NodeStatistics, NodeStatisticsDataType
 from .notification import (
     EntryControlNotification,
     EntryControlNotificationDataType,
@@ -46,253 +53,14 @@ if TYPE_CHECKING:
     from ..client import Client
 
 
-class NodeStatisticsDataType(TypedDict):
-    """Represent a node statistics data dict type."""
-
-    # https://github.com/zwave-js/node-zwave-js/blob/master/packages/zwave-js/src/lib/node/NodeStatistics.ts#L21-L33
-    commandsTX: int
-    commandsRX: int
-    commandsDroppedTX: int
-    commandsDroppedRX: int
-    timeoutResponse: int
-
-
-class NodeStatistics:
-    """Represent a node statistics update."""
-
-    def __init__(self, data: Optional[NodeStatisticsDataType] = None) -> None:
-        """Initialize node statistics."""
-        self.data = data or NodeStatisticsDataType(
-            commandsDroppedRX=0,
-            commandsDroppedTX=0,
-            commandsRX=0,
-            commandsTX=0,
-            timeoutResponse=0,
-        )
-
-    @property
-    def commands_tx(self) -> int:
-        """Return number of commands successfully sent to node."""
-        return self.data["commandsTX"]
-
-    @property
-    def commands_rx(self) -> int:
-        """
-        Return number of commands received from node.
-
-        Includes responses to sent commands.
-        """
-        return self.data["commandsRX"]
-
-    @property
-    def commands_dropped_rx(self) -> int:
-        """Return number of commands from node that were dropped by host."""
-        return self.data["commandsDroppedRX"]
-
-    @property
-    def commands_dropped_tx(self) -> int:
-        """
-        Return number of outgoing commands that were dropped.
-
-        These commands could not be sent.
-        """
-        return self.data["commandsDroppedTX"]
-
-    @property
-    def timeout_response(self) -> int:
-        """Return number of Get-type cmds where node's response didn't come in time."""
-        return self.data["timeoutResponse"]
-
-
-class LifelineHealthCheckResultDataType(TypedDict, total=False):
-    """Represent a lifeline health check result data dict type."""
-
-    # https://github.com/zwave-js/node-zwave-js/blob/master/packages/zwave-js/src/lib/node/Types.ts#L171
-    latency: int  # required
-    numNeighbors: int  # required
-    failedPingsNode: int  # required
-    routeChanges: int
-    minPowerlevel: int
-    failedPingsController: int
-    snrMargin: int
-
-
-class LifelineHealthCheckSummaryDataType(TypedDict):
-    """Represent a lifeline health check summary data dict type."""
-
-    # https://github.com/zwave-js/node-zwave-js/blob/master/packages/zwave-js/src/lib/node/Types.ts#L211
-    results: List[LifelineHealthCheckResultDataType]
-    rating: int
-
-
-class LifelineHealthCheckResult:
-    """Represent a lifeline health check result."""
-
-    def __init__(self, data: LifelineHealthCheckResultDataType) -> None:
-        """Initialize lifeline health check result."""
-        self.data = data
-
-    @property
-    def latency(self) -> int:
-        """Return latency."""
-        return self.data["latency"]
-
-    @property
-    def num_neighbors(self) -> int:
-        """Return number of neighbors."""
-        return self.data["numNeighbors"]
-
-    @property
-    def failed_pings_node(self) -> int:
-        """Return number of failed pings to node."""
-        return self.data["failedPingsNode"]
-
-    @property
-    def route_changes(self) -> Optional[int]:
-        """Return number of route changes."""
-        return self.data.get("routeChanges")
-
-    @property
-    def min_power_level(self) -> Optional[PowerLevel]:
-        """Return minimum power level."""
-        power_level = self.data.get("minPowerlevel")
-        if power_level is not None:
-            return PowerLevel(power_level)
-        return None
-
-    @property
-    def failed_pings_controller(self) -> Optional[int]:
-        """Return number of failed pings to controller."""
-        return self.data.get("failedPingsController")
-
-    @property
-    def snr_margin(self) -> Optional[int]:
-        """Return SNR margin."""
-        return self.data.get("snrMargin")
-
-
-class LifelineHealthCheckSummary:
-    """Represent a lifeline health check summary update."""
-
-    def __init__(self, data: LifelineHealthCheckSummaryDataType) -> None:
-        """Initialize lifeline health check summary."""
-        self._rating = data["rating"]
-        self._results = [LifelineHealthCheckResult(r) for r in data.get("results", [])]
-
-    @property
-    def rating(self) -> int:
-        """Return rating."""
-        return self._rating
-
-    @property
-    def results(self) -> List[LifelineHealthCheckResult]:
-        """Return lifeline health check results."""
-        return self._results
-
-
-class RouteHealthCheckResultDataType(TypedDict, total=False):
-    """Represent a route health check result data dict type."""
-
-    # https://github.com/zwave-js/node-zwave-js/blob/master/packages/zwave-js/src/lib/node/Types.ts#L242
-    numNeighbors: int  # required
-    rating: int  # required
-    failedPingsToTarget: int
-    failedPingsToSource: int
-    minPowerlevelSource: int
-    minPowerlevelTarget: int
-
-
-class RouteHealthCheckSummaryDataType(TypedDict):
-    """Represent a route health check summary data dict type."""
-
-    # https://github.com/zwave-js/node-zwave-js/blob/master/packages/zwave-js/src/lib/node/Types.ts#L274
-    results: List[RouteHealthCheckResultDataType]
-    rating: int
-
-
-class RouteHealthCheckResult:
-    """Represent a route health check result."""
-
-    def __init__(self, data: RouteHealthCheckResultDataType) -> None:
-        """Initialize route health check result."""
-        self.data = data
-
-    @property
-    def num_neighbors(self) -> int:
-        """Return number of neighbors."""
-        return self.data["numNeighbors"]
-
-    @property
-    def rating(self) -> int:
-        """Return rating."""
-        return self.data["rating"]
-
-    @property
-    def failed_pings_to_target(self) -> Optional[int]:
-        """Return number of failed pings to target."""
-        return self.data.get("failedPingsToTarget")
-
-    @property
-    def failed_pings_to_source(self) -> Optional[int]:
-        """Return number of failed pings to source."""
-        return self.data.get("failedPingsToSource")
-
-    @property
-    def min_power_level_source(self) -> Optional[PowerLevel]:
-        """Return minimum power level source."""
-        power_level = self.data.get("minPowerlevelSource")
-        if power_level is not None:
-            return PowerLevel(power_level)
-        return None
-
-    @property
-    def min_power_level_target(self) -> Optional[PowerLevel]:
-        """Return minimum power level target."""
-        power_level = self.data.get("minPowerlevelTarget")
-        if power_level is not None:
-            return PowerLevel(power_level)
-        return None
-
-
-class RouteHealthCheckSummary:
-    """Represent a route health check summary update."""
-
-    def __init__(self, data: RouteHealthCheckSummaryDataType) -> None:
-        """Initialize route health check summary."""
-        self._rating = data["rating"]
-        self._results = [RouteHealthCheckResult(r) for r in data.get("results", [])]
-
-    @property
-    def rating(self) -> int:
-        """Return rating."""
-        return self._rating
-
-    @property
-    def results(self) -> List[RouteHealthCheckResult]:
-        """Return route health check results."""
-        return self._results
-
-
-@dataclass
-class TestPowerLevelProgress:
-    """Class to represent a test power level progress update."""
-
-    acknowledged: int
-    total: int
-
-
-@dataclass
-class CheckHealthProgress:
-    """Represent a check lifeline/route health progress update."""
-
-    rounds: int
-    total_rounds: int
-    last_rating: int
-
-
-class NodeDataType(EndpointDataType):
+class NodeDataType(TypedDict, total=False):
     """Represent a node data dict type."""
 
+    nodeId: int  # required
+    index: int  # required
+    deviceClass: DeviceClassDataType  # required
+    installerIcon: int
+    userIcon: int
     name: str
     location: str
     status: int  # 0-4  # required
@@ -324,43 +92,26 @@ class NodeDataType(EndpointDataType):
     aggregatedEndpointCount: int
     interviewAttempts: int
     interviewStage: Optional[Union[int, str]]
-    commandClasses: List[CommandClassInfoDataType]
     values: List[ValueDataType]
     statistics: NodeStatisticsDataType
     highestSecurityClass: int
+    isControllerNode: bool
 
 
-class Node(Endpoint):
+class Node(EventBase):
     """Represent a Z-Wave JS node."""
 
     def __init__(self, client: "Client", data: NodeDataType) -> None:
         """Initialize the node."""
-        super().__init__(client, data)
-        self.data: NodeDataType = data
-        self._device_config = DeviceConfig(self.data.get("deviceConfig", {}))
-        self._statistics = NodeStatistics(self.data.get("statistics"))
+        super().__init__()
+        self.client = client
+        self.data: NodeDataType = {}
+        self._device_config: DeviceConfig = DeviceConfig({})
+        self._statistics: NodeStatistics = NodeStatistics()
         self._firmware_update_progress: Optional[FirmwareUpdateProgress] = None
-        self.values: Dict[str, Union[Value, ConfigurationValue]] = {}
-        for val in data["values"]:
-            value_id = _get_value_id_from_dict(self, val)
-            try:
-                self.values[value_id] = _init_value(self, val)
-            except UnparseableValue:
-                # If we can't parse the value, don't store it
-                pass
-
-        self.endpoints = {
-            endpoint["index"]: Endpoint(
-                self.client,
-                endpoint,
-                {
-                    value_id: value
-                    for value_id, value in self.values.items()
-                    if self.index == value.endpoint
-                },
-            )
-            for endpoint in self.data["endpoints"]
-        }
+        self.values: Dict[str, Union[ConfigurationValue, Value]] = {}
+        self.endpoints: Dict[int, Endpoint] = {}
+        self.update(data)
 
     def __repr__(self) -> str:
         """Return the representation."""
@@ -377,6 +128,31 @@ class Node(Endpoint):
         return (
             self.client.driver == other.client.driver and self.node_id == other.node_id
         )
+
+    @property
+    def node_id(self) -> int:
+        """Return node ID property."""
+        return self.data["nodeId"]
+
+    @property
+    def index(self) -> int:
+        """Return index property."""
+        return self.data["index"]
+
+    @property
+    def device_class(self) -> DeviceClass:
+        """Return the device_class."""
+        return DeviceClass(self.data["deviceClass"])
+
+    @property
+    def installer_icon(self) -> Optional[int]:
+        """Return installer icon property."""
+        return self.data.get("installerIcon")
+
+    @property
+    def user_icon(self) -> Optional[int]:
+        """Return user icon property."""
+        return self.data.get("userIcon")
 
     @property
     def status(self) -> NodeStatus:
@@ -531,7 +307,7 @@ class Node(Endpoint):
     @property
     def command_classes(self) -> List[CommandClassInfo]:
         """Return all CommandClasses supported on this node."""
-        return [CommandClassInfo(cc) for cc in self.data["commandClasses"]]
+        return self.endpoints[0].command_classes
 
     @property
     def statistics(self) -> NodeStatistics:
@@ -549,6 +325,65 @@ class Node(Endpoint):
         if (security_class := self.data.get("highestSecurityClass")) is None:
             return None
         return SecurityClass(security_class)
+
+    @property
+    def is_controller_node(self) -> bool:
+        """Return whether the node is a controller node."""
+        return self.data["isControllerNode"]
+
+    @property
+    def keep_awake(self) -> bool:
+        """Return whether the node is set to keep awake."""
+        return self.data["keepAwake"]
+
+    def update(self, data: NodeDataType) -> None:
+        """Update the internal state data."""
+        self.data = data
+        self._device_config = DeviceConfig(self.data.get("deviceConfig", {}))
+        self._statistics = NodeStatistics(self.data.get("statistics"))
+
+        # Remove stale values
+        value_ids = (_get_value_id_from_dict(self, val) for val in data["values"])
+        self.values = {
+            value_id: val
+            for value_id, val in self.values.items()
+            if value_id in value_ids
+        }
+
+        # Populate new values
+        for val in data["values"]:
+            try:
+                if (value_id := _get_value_id_from_dict(self, val)) in self.values:
+                    self.values[value_id].update(val)
+                else:
+                    self.values[value_id] = _init_value(self, val)
+            except UnparseableValue:
+                # If we can't parse the value, don't store it
+                pass
+
+        # Remove stale endpoints
+        self.endpoints = {
+            idx: endpoint
+            for idx, endpoint in self.endpoints.items()
+            if idx in (endpoint["index"] for endpoint in self.data["endpoints"])
+        }
+
+        # Add new endpoints or update existing ones
+        for endpoint in self.data["endpoints"]:
+            idx = endpoint["index"]
+            values = {
+                value_id: value
+                for value_id, value in self.values.items()
+                if self.index == value.endpoint
+            }
+            if idx in self.endpoints:
+                self.endpoints[idx].update(endpoint, values)
+            else:
+                self.endpoints[idx] = Endpoint(
+                    self.client,
+                    endpoint,
+                    values,
+                )
 
     def get_command_class_values(
         self, command_class: CommandClass, endpoint: int = None
@@ -585,8 +420,8 @@ class Node(Endpoint):
         """
         Send a node command. For internal use only.
 
-        If wait_for_result is not None, it will take precedence, otherwise we will decide to wait
-        or not based on the node status.
+        If wait_for_result is not None, it will take precedence, otherwise we will decide
+        to wait or not based on the node status.
         """
         kwargs = {}
         message = {"command": f"node.{cmd}", "nodeId": self.node_id, **cmd_kwargs}
@@ -713,6 +548,22 @@ class Node(Endpoint):
         )
         return cast(bool, data.get("responded", False))
 
+    async def async_invoke_cc_api(
+        self,
+        command_class: CommandClass,
+        method_name: str,
+        *args: Any,
+        wait_for_result: Optional[bool] = None,
+    ) -> Any:
+        """Call endpoint.invoke_cc_api command."""
+        return await self.endpoints[0].async_invoke_cc_api(
+            command_class, method_name, *args, wait_for_result=wait_for_result
+        )
+
+    async def async_supports_cc_api(self, command_class: CommandClass) -> bool:
+        """Call endpoint.supports_cc_api command."""
+        return await self.endpoints[0].async_supports_cc_api(command_class)
+
     async def async_has_security_class(self, security_class: SecurityClass) -> bool:
         """Return whether node has the given security class."""
         data = await self.async_send_command(
@@ -779,6 +630,61 @@ class Node(Endpoint):
         assert data
         return RouteHealthCheckSummary(data["summary"])
 
+    async def async_get_state(self) -> None:
+        """Get node state."""
+        data = await self.async_send_command(
+            "get_state", require_schema=14, wait_for_result=True
+        )
+        assert data
+        self.update(data["state"])
+
+    async def async_set_name(
+        self, name: str, update_cc: bool = True, wait_for_result: Optional[bool] = None
+    ) -> None:
+        """Set node name."""
+        # If we may not potentially update the name CC, we should just wait for the
+        # result because the change is local to the driver
+        if not update_cc:
+            wait_for_result = True
+        await self.async_send_command(
+            "set_name",
+            name=name,
+            updateCC=update_cc,
+            wait_for_result=wait_for_result,
+            require_schema=14,
+        )
+        self.data["name"] = name
+
+    async def async_set_location(
+        self,
+        location: str,
+        update_cc: bool = True,
+        wait_for_result: Optional[bool] = None,
+    ) -> None:
+        """Set node location."""
+        # If we may not potentially update the location CC, we should just wait for the
+        # result because the change is local to the driver
+        if not update_cc:
+            wait_for_result = True
+        await self.async_send_command(
+            "set_location",
+            location=location,
+            updateCC=update_cc,
+            wait_for_result=wait_for_result,
+            require_schema=14,
+        )
+        self.data["location"] = location
+
+    async def async_set_keep_awake(self, keep_awake: bool) -> None:
+        """Set node keep awake state."""
+        await self.async_send_command(
+            "set_keep_awake",
+            keepAwake=keep_awake,
+            wait_for_result=True,
+            require_schema=14,
+        )
+        self.data["keepAwake"] = keep_awake
+
     def handle_test_powerlevel_progress(self, event: Event) -> None:
         """Process a test power level progress event."""
         event.data["test_power_level_progress"] = TestPowerLevelProgress(
@@ -840,38 +746,47 @@ class Node(Endpoint):
     def handle_ready(self, event: Event) -> None:
         """Process a node ready event."""
         # the event contains a full dump of the node
-        self.data.update(event.data["nodeState"])
-        # update device config
-        if new_device_config := self.data.get("deviceConfig"):
-            self._device_config = DeviceConfig(new_device_config)
-        # update/add values
-        for value_state in event.data["nodeState"]["values"]:
-            value_id = _get_value_id_from_dict(self, value_state)
-            value = self.values.get(value_id)
-            if value is None:
-                self.values[value_id] = _init_value(self, value_state)
-            else:
-                value.update(value_state)
+        self.update(event.data["nodeState"])
 
     def handle_value_added(self, event: Event) -> None:
         """Process a node value added event."""
         self.handle_value_updated(event)
 
+    def value_data_idx(self, value_id: str) -> int:
+        """Get the index for the given value ID in the node's value data."""
+        values = self.data["values"]
+        return next(
+            idx
+            for idx in range(len(values))
+            if _get_value_id_from_dict(self, values[idx]) == value_id
+        )
+
     def handle_value_updated(self, event: Event) -> None:
         """Process a node value updated event."""
-        value = self.values.get(_get_value_id_from_dict(self, event.data["args"]))
+        evt_val_data: ValueDataType = event.data["args"]
+        value_id = _get_value_id_from_dict(self, evt_val_data)
+        value = self.values.get(value_id)
         if value is None:
-            value = _init_value(self, event.data["args"])
+            value = _init_value(self, evt_val_data)
             self.values[value.value_id] = event.data["value"] = value
+            self.data["values"].append(evt_val_data)
         else:
             value.receive_event(event)
             event.data["value"] = value
+            self.data["values"][self.value_data_idx(value_id)].update(evt_val_data)
+
+        node_val_data = self.data["values"][self.value_data_idx(value_id)]
+        if "newValue" in evt_val_data:
+            node_val_data["value"] = evt_val_data["newValue"]
+
+        node_val_data.pop("newValue", None)
+        node_val_data.pop("prevValue", None)
 
     def handle_value_removed(self, event: Event) -> None:
         """Process a node value removed event."""
-        event.data["value"] = self.values.pop(
-            _get_value_id_from_dict(self, event.data["args"])
-        )
+        value_id = _get_value_id_from_dict(self, event.data["args"])
+        event.data["value"] = self.values.pop(value_id)
+        self.data["values"].pop(self.value_data_idx(value_id))
 
     def handle_value_notification(self, event: Event) -> None:
         """Process a node value notification event."""

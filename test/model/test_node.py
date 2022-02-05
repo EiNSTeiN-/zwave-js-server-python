@@ -1,4 +1,5 @@
 """Test the node model."""
+from copy import deepcopy
 import json
 from unittest.mock import patch
 
@@ -20,13 +21,12 @@ from zwave_js_server.event import Event
 from zwave_js_server.exceptions import FailedCommand, NotFoundError, UnwriteableValue
 from zwave_js_server.model import node as node_pkg
 from zwave_js_server.model.firmware import FirmwareUpdateStatus
-from zwave_js_server.model.node import (
+from zwave_js_server.model.node_health_check import (
     LifelineHealthCheckResultDataType,
-    Node,
-    NodeStatistics,
     RouteHealthCheckResultDataType,
 )
-from zwave_js_server.model.value import ConfigurationValue
+from zwave_js_server.model.node_statistics import NodeStatistics
+from zwave_js_server.model.value import ConfigurationValue, get_value_id
 
 from .. import load_fixture
 
@@ -73,9 +73,14 @@ def test_from_state():
     assert node.individual_endpoint_count is None
     assert node.aggregated_endpoint_count is None
     assert node.interview_stage == "Neighbors"
+    assert not node.is_controller_node
+    assert not node.keep_awake
     assert len(node.command_classes) == 0
     assert len(node.endpoints) == 1
     assert node.endpoints[0].index == 0
+    assert node.endpoints[0].installer_icon is None
+    assert node.endpoints[0].user_icon is None
+    assert node.endpoints[0].command_classes == []
     device_class = node.endpoints[0].device_class
     assert device_class.basic.key == 2
     assert device_class.generic.key == 2
@@ -99,7 +104,7 @@ async def test_highest_security_value(lock_schlage_be469, ring_keypad):
 
 async def test_device_config(wallmote_central_scene):
     """Test a device config."""
-    node: Node = wallmote_central_scene
+    node: node_pkg.Node = wallmote_central_scene
 
     device_config = node.device_config
     assert device_config.is_embedded
@@ -466,8 +471,12 @@ async def test_node_status_events(multisensor_6):
 
 
 async def test_value_added_events(multisensor_6):
-    """Test Node value added events."""
+    """Test Node value added events for new value."""
     node = multisensor_6
+    value_id = "52-112-0-6"
+    # Validate that the value doesn't exist in the node state data
+    with pytest.raises(StopIteration):
+        node.value_data_idx(value_id)
     event = Event(
         type="value added",
         data={
@@ -478,7 +487,7 @@ async def test_value_added_events(multisensor_6):
                 "commandClassName": "Configuration",
                 "commandClass": 112,
                 "endpoint": 0,
-                "property": 2,
+                "property": 6,
                 "propertyName": "Stay Awake in Battery Mode",
                 "metadata": {
                     "type": "number",
@@ -501,10 +510,85 @@ async def test_value_added_events(multisensor_6):
     )
     node.handle_value_added(event)
     assert isinstance(event.data["value"], ConfigurationValue)
-    assert isinstance(node.values["52-112-0-2"], ConfigurationValue)
+    assert isinstance(node.values[value_id], ConfigurationValue)
+    # ensure that the value was added to the node's state data
+    assert node.value_data_idx(value_id)
 
 
-async def test_value_notification(wallmote_central_scene: Node):
+async def test_value_updated_events(multisensor_6):
+    """Test Node value updated events."""
+    node = multisensor_6
+    value_id = "52-112-0-2"
+    # ensure that the value is in the node's state data
+    assert (value_idx := node.value_data_idx(value_id))
+    # assert the old value of the ZwaveValue
+    assert (value_data := node.data["values"][value_idx]) is not None
+    assert value_data["value"] == node.values[value_id].value == 0
+    event = Event(
+        type="value updated",
+        data={
+            "source": "node",
+            "event": "value updated",
+            "nodeId": 52,
+            "args": {
+                "commandClassName": "Configuration",
+                "commandClass": 112,
+                "endpoint": 0,
+                "property": 2,
+                "propertyName": "Stay Awake in Battery Mode",
+                "newValue": 1,
+                "prevValue": 0,
+            },
+        },
+    )
+    node.handle_value_updated(event)
+    assert isinstance(event.data["value"], ConfigurationValue)
+    assert isinstance(node.values[value_id], ConfigurationValue)
+    # ensure that the value is in to the node's state data
+    assert (value_idx := node.value_data_idx(value_id))
+    # ensure that the node's state data was updated and that old keys were removed
+    assert (value_data := node.data["values"][value_idx]) is not None
+    assert value_data["metadata"]
+    assert value_data["value"] == 1
+    assert "newValue" not in value_data
+    assert "prevValue" not in value_data
+    # ensure that the value's state data was updated and that old keys were removed
+    val = node.values[value_id]
+    assert val.data["value"] == 1
+    assert "newValue" not in val.data
+    assert "prevValue" not in val.data
+
+
+async def test_value_removed_events(multisensor_6):
+    """Test Node value removed events."""
+    node = multisensor_6
+    value_id = "52-112-0-2"
+    event = Event(
+        type="value removed",
+        data={
+            "source": "node",
+            "event": "value removed",
+            "nodeId": 52,
+            "args": {
+                "commandClassName": "Configuration",
+                "commandClass": 112,
+                "endpoint": 0,
+                "property": 2,
+                "propertyName": "Stay Awake in Battery Mode",
+                "prevValue": 0,
+            },
+        },
+    )
+    node.handle_value_removed(event)
+    assert isinstance(event.data["value"], ConfigurationValue)
+    # ensure that the value was removed from the nodes value's dict
+    assert node.values.get(value_id) is None
+    # ensure that the value was removed from the node's state data
+    with pytest.raises(StopIteration):
+        node.value_data_idx(value_id)
+
+
+async def test_value_notification(wallmote_central_scene: node_pkg.Node):
     """Test value notification events."""
     node = wallmote_central_scene
 
@@ -565,7 +649,7 @@ async def test_value_notification(wallmote_central_scene: Node):
     assert event.data["value_notification"].value == 2
 
 
-async def test_metadata_updated(climate_radio_thermostat_ct100_plus: Node):
+async def test_metadata_updated(climate_radio_thermostat_ct100_plus: node_pkg.Node):
     """Test metadata updated events."""
     node = climate_radio_thermostat_ct100_plus
 
@@ -619,7 +703,7 @@ async def test_metadata_updated(climate_radio_thermostat_ct100_plus: Node):
     assert value.metadata.states
 
 
-async def test_notification(lock_schlage_be469: Node):
+async def test_notification(lock_schlage_be469: node_pkg.Node):
     """Test notification CC notification events."""
     node = lock_schlage_be469
 
@@ -736,7 +820,7 @@ async def test_interview_events(multisensor_6):
 
 async def test_refresh_values(multisensor_6, uuid4, mock_command):
     """Test refresh_values and refresh_cc_values commands."""
-    node: Node = multisensor_6
+    node: node_pkg.Node = multisensor_6
     ack_commands = mock_command(
         {"command": "node.refresh_values", "nodeId": node.node_id},
         {"success": True},
@@ -767,7 +851,7 @@ async def test_refresh_values(multisensor_6, uuid4, mock_command):
     }
 
 
-async def test_firmware_events(wallmote_central_scene: Node):
+async def test_firmware_events(wallmote_central_scene: node_pkg.Node):
     """Test firmware events."""
     node = wallmote_central_scene
     assert node.firmware_update_progress is None
@@ -812,7 +896,7 @@ async def test_firmware_events(wallmote_central_scene: Node):
 
 async def test_value_added_value_exists(climate_radio_thermostat_ct100_plus):
     """Test value added event when value exists."""
-    node: Node = climate_radio_thermostat_ct100_plus
+    node: node_pkg.Node = climate_radio_thermostat_ct100_plus
     value_id = f"{node.node_id}-128-1-isHigh"
     value = node.values.get(value_id)
     assert value
@@ -845,7 +929,7 @@ async def test_value_added_value_exists(climate_radio_thermostat_ct100_plus):
 
 async def test_value_added_new_value(climate_radio_thermostat_ct100_plus):
     """Test value added event when new value is added."""
-    node: Node = climate_radio_thermostat_ct100_plus
+    node: node_pkg.Node = climate_radio_thermostat_ct100_plus
     event = Event(
         "value added",
         {
@@ -873,7 +957,7 @@ async def test_value_added_new_value(climate_radio_thermostat_ct100_plus):
 
 
 async def test_invoke_cc_api(multisensor_6, uuid4, mock_command):
-    """Test endpoint.invoke_cc_api commands."""
+    """Test endpoint. commands."""
     node = multisensor_6
     ack_commands = mock_command(
         {"command": "endpoint.invoke_cc_api", "nodeId": node.node_id, "endpoint": 0},
@@ -942,7 +1026,7 @@ async def test_supports_cc_api(multisensor_6, uuid4, mock_command):
         await node.async_supports_cc_api(CommandClass.USER_CODE)
 
 
-async def test_statistics_updated(wallmote_central_scene: Node):
+async def test_statistics_updated(wallmote_central_scene: node_pkg.Node):
     """Test that statistics get updated on events."""
     node = wallmote_central_scene
     assert node.statistics.commands_rx == 0
@@ -969,7 +1053,7 @@ async def test_statistics_updated(wallmote_central_scene: Node):
     assert node.statistics == event_stats
 
 
-async def test_has_security_class(multisensor_6: Node, uuid4, mock_command):
+async def test_has_security_class(multisensor_6: node_pkg.Node, uuid4, mock_command):
     """Test node.has_security_class command."""
     node = multisensor_6
     ack_commands = mock_command(
@@ -987,7 +1071,9 @@ async def test_has_security_class(multisensor_6: Node, uuid4, mock_command):
     }
 
 
-async def test_get_highest_security_class(multisensor_6: Node, uuid4, mock_command):
+async def test_get_highest_security_class(
+    multisensor_6: node_pkg.Node, uuid4, mock_command
+):
     """Test node.get_highest_security_class command."""
     node = multisensor_6
     ack_commands = mock_command(
@@ -1006,7 +1092,7 @@ async def test_get_highest_security_class(multisensor_6: Node, uuid4, mock_comma
     }
 
 
-async def test_test_power_level(multisensor_6: Node, uuid4, mock_command):
+async def test_test_power_level(multisensor_6: node_pkg.Node, uuid4, mock_command):
     """Test node.test_powerlevel command."""
     node = multisensor_6
     ack_commands = mock_command(
@@ -1027,7 +1113,7 @@ async def test_test_power_level(multisensor_6: Node, uuid4, mock_command):
 
 
 async def test_test_power_level_progress_event(
-    multisensor_6: Node, uuid4, mock_command
+    multisensor_6: node_pkg.Node, uuid4, mock_command
 ):
     """Test test power level progress event."""
     event = Event(
@@ -1046,7 +1132,7 @@ async def test_test_power_level_progress_event(
     assert event.data["test_power_level_progress"].total == 2
 
 
-async def test_check_lifeline_health(multisensor_6: Node, uuid4, mock_command):
+async def test_check_lifeline_health(multisensor_6: node_pkg.Node, uuid4, mock_command):
     """Test node.check_lifeline_health command."""
     node = multisensor_6
     ack_commands = mock_command(
@@ -1089,7 +1175,7 @@ async def test_check_lifeline_health(multisensor_6: Node, uuid4, mock_command):
 
 
 async def test_check_lifeline_health_progress_event(
-    multisensor_6: Node, uuid4, mock_command
+    multisensor_6: node_pkg.Node, uuid4, mock_command
 ):
     """Test check lifeline health progress event."""
     event = Event(
@@ -1110,7 +1196,7 @@ async def test_check_lifeline_health_progress_event(
     assert event.data["check_lifeline_health_progress"].last_rating == 10
 
 
-async def test_check_route_health(multisensor_6: Node, uuid4, mock_command):
+async def test_check_route_health(multisensor_6: node_pkg.Node, uuid4, mock_command):
     """Test node.check_route_health command."""
     node = multisensor_6
     ack_commands = mock_command(
@@ -1152,7 +1238,7 @@ async def test_check_route_health(multisensor_6: Node, uuid4, mock_command):
 
 
 async def test_check_route_health_progress_event(
-    multisensor_6: Node, uuid4, mock_command
+    multisensor_6: node_pkg.Node, uuid4, mock_command
 ):
     """Test check route health progress event."""
     event = Event(
@@ -1171,3 +1257,120 @@ async def test_check_route_health_progress_event(
     assert event.data["check_route_health_progress"].rounds == 1
     assert event.data["check_route_health_progress"].total_rounds == 2
     assert event.data["check_route_health_progress"].last_rating == 10
+
+
+async def test_get_state(
+    multisensor_6: node_pkg.Node,
+    multisensor_6_state: node_pkg.NodeDataType,
+    uuid4,
+    mock_command,
+):
+    """Test node.get_state command."""
+    node = multisensor_6
+    value_id = get_value_id(node, 32, "currentValue", 0)
+
+    # Verify original values
+    assert node.endpoints[0].installer_icon == 3079
+    assert node.values[value_id].value == 255
+
+    new_state = deepcopy(multisensor_6_state)
+    # Update endpoint 0 installer icon
+    new_state["endpoints"][0]["installerIcon"] = 1
+    # Update value of {nodeId}-32-0-currentValue
+    new_state["values"][0] = {
+        "commandClassName": "Basic",
+        "commandClass": 32,
+        "endpoint": 0,
+        "property": "currentValue",
+        "propertyName": "currentValue",
+        "metadata": {
+            "type": "number",
+            "readable": True,
+            "writeable": False,
+            "min": 0,
+            "max": 99,
+            "label": "Current value",
+        },
+        "value": 0,
+    }
+    ack_commands = mock_command(
+        {"command": "node.get_state", "nodeId": node.node_id},
+        {"state": new_state},
+    )
+
+    # Verify new values
+    assert await node.async_get_state() is None
+    assert node.endpoints[0].installer_icon == 1
+    assert node.values[value_id].value == 0
+
+    assert len(ack_commands) == 1
+    assert ack_commands[0] == {
+        "command": "node.get_state",
+        "nodeId": node.node_id,
+        "messageId": uuid4,
+    }
+
+
+async def test_set_name(multisensor_6: node_pkg.Node, uuid4, mock_command):
+    """Test node.set_name command."""
+    node = multisensor_6
+    ack_commands = mock_command(
+        {"command": "node.set_name", "nodeId": node.node_id},
+        {},
+    )
+
+    assert node.name != "new_name"
+    assert await node.async_set_name("new_name", False) is None
+    assert node.name == "new_name"
+
+    assert len(ack_commands) == 1
+    assert ack_commands[0] == {
+        "command": "node.set_name",
+        "nodeId": node.node_id,
+        "name": "new_name",
+        "updateCC": False,
+        "messageId": uuid4,
+    }
+
+
+async def test_set_location(multisensor_6: node_pkg.Node, uuid4, mock_command):
+    """Test node.set_location command."""
+    node = multisensor_6
+    ack_commands = mock_command(
+        {"command": "node.set_location", "nodeId": node.node_id},
+        {},
+    )
+
+    assert node.location != "new_location"
+    assert await node.async_set_location("new_location", False) is None
+    assert node.location == "new_location"
+
+    assert len(ack_commands) == 1
+    assert ack_commands[0] == {
+        "command": "node.set_location",
+        "nodeId": node.node_id,
+        "location": "new_location",
+        "updateCC": False,
+        "messageId": uuid4,
+    }
+
+
+async def test_set_keep_awake(multisensor_6: node_pkg.Node, uuid4, mock_command):
+    """Test node.set_keep_awake command."""
+    node = multisensor_6
+    ack_commands = mock_command(
+        {"command": "node.set_keep_awake", "nodeId": node.node_id},
+        {},
+    )
+
+    assert node.keep_awake
+    assert await node.async_set_keep_awake(False) is None
+    assert node.keep_awake is False
+
+    assert len(ack_commands) == 1
+    assert ack_commands[0] == {
+        "command": "node.set_keep_awake",
+        "nodeId": node.node_id,
+        "keepAwake": False,
+        "messageId": uuid4,
+    }
